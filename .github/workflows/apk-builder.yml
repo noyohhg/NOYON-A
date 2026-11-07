@@ -261,3 +261,5 @@ jobs:
               -H "Authorization: Bearer $BUILD_OIDC_TOKEN" \
               -d "{\"job_id\":\"$JOB_ID\",\"error\":\"Build failed. Check GitHub Actions logs.\"}" || true
           fi
+
+# Backend route verification after enabling the AppDeploy backend.
