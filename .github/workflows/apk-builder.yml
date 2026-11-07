@@ -1,0 +1,247 @@
+name: NOYON APK Builder
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: noyon-apk-builder
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check configuration
+        id: config
+        env:
+          BUILD_API_URL: ${{ secrets.BUILD_API_URL }}
+          BUILD_API_SECRET: ${{ secrets.BUILD_API_SECRET }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          if [ -z "$BUILD_API_URL" ] || [ -z "$BUILD_API_SECRET" ] || [ -z "$TELEGRAM_BOT_TOKEN" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "Required Actions secrets are not configured yet."
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Claim one build job
+        if: steps.config.outputs.configured == 'true'
+        id: claim
+        env:
+          BUILD_API_URL: ${{ secrets.BUILD_API_URL }}
+          BUILD_API_SECRET: ${{ secrets.BUILD_API_SECRET }}
+        run: |
+          set -euo pipefail
+          curl -fsS --retry 3 -H "x-worker-secret: $BUILD_API_SECRET" \
+            "$BUILD_API_URL/api/build/claim" -o job.json
+          JOB_ID="$(jq -r '.job.id // empty' job.json)"
+          if [ -z "$JOB_ID" ]; then
+            echo "has_job=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "has_job=true" >> "$GITHUB_OUTPUT"
+          echo "$JOB_ID" > job_id.txt
+          jq -r '.job.app_name // "NOYON App"' job.json > app_name.txt
+          jq -r '.job.project_url // empty' job.json > project_url.txt
+          jq -r '.job.project_file_name // "project.zip"' job.json > project_file_name.txt
+          jq -r '.job.telegram_user_id // empty' job.json > chat_id.txt
+          jq -r '.job.logo_url // empty' job.json > logo_url.txt
+          if [ ! -s project_url.txt ] || [ ! -s chat_id.txt ]; then
+            echo "Job is missing project_url or telegram_user_id" >&2
+            exit 1
+          fi
+
+      - name: Set up Java
+        if: steps.claim.outputs.has_job == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        if: steps.claim.outputs.has_job == 'true'
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle
+        if: steps.claim.outputs.has_job == 'true'
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      - name: Prepare Android WebView project
+        if: steps.claim.outputs.has_job == 'true'
+        env:
+          BUILD_API_URL: ${{ secrets.BUILD_API_URL }}
+          BUILD_API_SECRET: ${{ secrets.BUILD_API_SECRET }}
+        run: |
+          set -euo pipefail
+          mkdir -p app/src/main/assets/site app/src/main/java/com/noyon/apk app/src/main/res/mipmap-mdpi app/src/main/res/mipmap-hdpi app/src/main/res/mipmap-xhdpi app/src/main/res/mipmap-xxhdpi app/src/main/res/mipmap-xxxhdpi
+          URL="$(cat project_url.txt)"
+          FILE_NAME="$(cat project_file_name.txt)"
+          case "$FILE_NAME" in
+            *.html|*.htm)
+              curl -fL --retry 3 "$URL" -o app/src/main/assets/site/index.html
+              ;;
+            *)
+              curl -fL --retry 3 "$URL" -o project.zip
+              python3 - <<'PY'
+          import os, zipfile
+          from pathlib import PurePosixPath
+          target = os.path.abspath("unzipped")
+          os.makedirs(target, exist_ok=True)
+          with zipfile.ZipFile("project.zip") as z:
+              for item in z.infolist():
+                  name = item.filename.replace("\\", "/")
+                  p = PurePosixPath(name)
+                  if p.is_absolute() or ".." in p.parts:
+                      raise SystemExit("Unsafe path found in uploaded ZIP")
+                  out = os.path.abspath(os.path.join(target, *p.parts))
+                  if not (out == target or out.startswith(target + os.sep)):
+                      raise SystemExit("Unsafe ZIP entry")
+                  if item.is_dir():
+                      os.makedirs(out, exist_ok=True)
+                  else:
+                      os.makedirs(os.path.dirname(out), exist_ok=True)
+                      with z.open(item) as src, open(out, "wb") as dst:
+                          dst.write(src.read())
+          matches = []
+          for root, dirs, files in os.walk(target):
+              if "index.html" in files:
+                  matches.append(root)
+          if not matches:
+              raise SystemExit("ZIP must contain index.html")
+          source = matches[0]
+          import shutil
+          shutil.copytree(source, "app/src/main/assets/site", dirs_exist_ok=True)
+          PY
+              ;;
+          esac
+
+          LOGO_URL="$(cat logo_url.txt)"
+          if [ -n "$LOGO_URL" ]; then
+            if curl -fsSL --max-time 20 "$LOGO_URL" -o logo-source; then
+              sudo apt-get update -qq && sudo apt-get install -y imagemagick >/dev/null
+              for spec in "mdpi 48" "hdpi 72" "xhdpi 96" "xxhdpi 144" "xxxhdpi 192"; do
+                set -- $spec
+                convert logo-source -thumbnail "${2}x${2}" -gravity center -background none -extent "${2}x${2}" "app/src/main/res/mipmap-${1}/ic_launcher.png" || true
+              done
+            fi
+          fi
+          for spec in "mdpi 48" "hdpi 72" "xhdpi 96" "xxhdpi 144" "xxxhdpi 192"; do
+            set -- $spec
+            if [ ! -f "app/src/main/res/mipmap-${1}/ic_launcher.png" ]; then
+              convert -size "${2}x${2}" xc:'#1769ff' "app/src/main/res/mipmap-${1}/ic_launcher.png"
+            fi
+          done
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }
+          rootProject.name = "NoyonGeneratedApp"
+          include(":app")
+          EOF
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+          }
+          EOF
+          cat > app/build.gradle <<'EOF'
+          plugins { id 'com.android.application' }
+          android {
+              namespace 'com.noyon.apk'
+              compileSdk 35
+              defaultConfig {
+                  applicationId 'com.noyon.apk'
+                  minSdk 23
+                  targetSdk 35
+                  versionCode 1
+                  versionName '1.0'
+              }
+          }
+          EOF
+          APP_LABEL="$(cat app_name.txt | tr -d '\r' | cut -c1-40)"
+          APP_LABEL_ESCAPED="$(printf '%s' "$APP_LABEL" | sed 's/[&<>]/ /g')"
+          cat > app/src/main/AndroidManifest.xml <<EOF
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <application android:theme="@android:style/Theme.Material.Light.NoActionBar" android:label="$APP_LABEL_ESCAPED" android:icon="@mipmap/ic_launcher" android:usesCleartextTraffic="false">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+          cat > app/src/main/java/com/noyon/apk/MainActivity.kt <<'EOF'
+          package com.noyon.apk
+          import android.app.Activity
+          import android.os.Bundle
+          import android.webkit.WebChromeClient
+          import android.webkit.WebView
+          import android.webkit.WebViewClient
+          class MainActivity : Activity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val web = WebView(this)
+                  web.settings.javaScriptEnabled = true
+                  web.settings.domStorageEnabled = true
+                  web.webChromeClient = WebChromeClient()
+                  web.webViewClient = WebViewClient()
+                  setContentView(web)
+                  web.loadUrl("file:///android_asset/site/index.html")
+              }
+              @Deprecated("Deprecated in Java")
+              override fun onBackPressed() {
+                  val view = (window.decorView.findViewById(android.R.id.content) as? android.view.ViewGroup)?.getChildAt(0) as? WebView
+                  if (view?.canGoBack() == true) view.goBack() else super.onBackPressed()
+              }
+          }
+          EOF
+          gradle wrapper --gradle-version 8.7
+
+      - name: Build APK
+        if: steps.claim.outputs.has_job == 'true'
+        run: ./gradlew --no-daemon assembleDebug
+
+      - name: Deliver APK to Telegram
+        if: steps.claim.outputs.has_job == 'true'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          BUILD_API_URL: ${{ secrets.BUILD_API_URL }}
+          BUILD_API_SECRET: ${{ secrets.BUILD_API_SECRET }}
+        run: |
+          set -euo pipefail
+          CHAT_ID="$(cat chat_id.txt)"
+          APP_LABEL="$(cat app_name.txt)"
+          curl -fsS --retry 2 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
+            -F "chat_id=${CHAT_ID}" \
+            -F "document=@app/build/outputs/apk/debug/app-debug.apk" \
+            -F "caption=✅ ${APP_LABEL} APK তৈরি সম্পন্ন।"
+          JOB_ID="$(cat job_id.txt)"
+          curl -fsS -X POST "$BUILD_API_URL/api/build/complete" \
+            -H "Content-Type: application/json" \
+            -H "x-worker-secret: $BUILD_API_SECRET" \
+            -d "{\"job_id\":\"$JOB_ID\",\"status\":\"completed\"}"
+
+      - name: Mark job failed
+        if: failure() && steps.claim.outputs.has_job == 'true'
+        env:
+          BUILD_API_URL: ${{ secrets.BUILD_API_URL }}
+          BUILD_API_SECRET: ${{ secrets.BUILD_API_SECRET }}
+        run: |
+          JOB_ID="$(cat job_id.txt 2>/dev/null || true)"
+          if [ -n "$JOB_ID" ]; then
+            curl -fsS -X POST "$BUILD_API_URL/api/build/fail" \
+              -H "Content-Type: application/json" \
+              -H "x-worker-secret: $BUILD_API_SECRET" \
+              -d "{\"job_id\":\"$JOB_ID\",\"error\":\"Build failed. Check GitHub Actions logs.\"}" || true
+          fi
