@@ -20,11 +20,9 @@ jobs:
       - name: Check configuration
         id: config
         env:
-          BUILD_API_URL: ${{ secrets.BUILD_API_URL }}
           BUILD_API_SECRET: ${{ secrets.BUILD_API_SECRET }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: |
-          if [ -z "$BUILD_API_URL" ] || [ -z "$BUILD_API_SECRET" ] || [ -z "$TELEGRAM_BOT_TOKEN" ]; then
+          if [ -z "$BUILD_API_SECRET" ]; then
             echo "configured=false" >> "$GITHUB_OUTPUT"
             echo "Required Actions secrets are not configured yet."
           else
@@ -35,7 +33,7 @@ jobs:
         if: steps.config.outputs.configured == 'true'
         id: claim
         env:
-          BUILD_API_URL: ${{ secrets.BUILD_API_URL }}
+          BUILD_API_URL: https://noyon-apk-master-build-server-kf12il.v2.appdeploy.ai
           BUILD_API_SECRET: ${{ secrets.BUILD_API_SECRET }}
         run: |
           set -euo pipefail
@@ -57,6 +55,16 @@ jobs:
             echo "Job is missing project_url or telegram_user_id" >&2
             exit 1
           fi
+          curl -fsS -H "x-worker-secret: $BUILD_API_SECRET" \
+            "$BUILD_API_URL/api/build/telegram-config" -o telegram-config.json
+          TELEGRAM_BOT_TOKEN="$(jq -r '.telegram_bot_token // empty' telegram-config.json)"
+          if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
+            echo "Telegram bot token is not configured on the build server" >&2
+            exit 1
+          fi
+          echo "::add-mask::$TELEGRAM_BOT_TOKEN"
+          echo "TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN" >> "$GITHUB_ENV"
+          rm -f telegram-config.json
 
       - name: Set up Java
         if: steps.claim.outputs.has_job == 'true'
@@ -78,7 +86,7 @@ jobs:
       - name: Prepare Android WebView project
         if: steps.claim.outputs.has_job == 'true'
         env:
-          BUILD_API_URL: ${{ secrets.BUILD_API_URL }}
+          BUILD_API_URL: https://noyon-apk-master-build-server-kf12il.v2.appdeploy.ai
           BUILD_API_SECRET: ${{ secrets.BUILD_API_SECRET }}
         run: |
           set -euo pipefail
@@ -215,8 +223,7 @@ jobs:
       - name: Deliver APK to Telegram
         if: steps.claim.outputs.has_job == 'true'
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          BUILD_API_URL: ${{ secrets.BUILD_API_URL }}
+          BUILD_API_URL: https://noyon-apk-master-build-server-kf12il.v2.appdeploy.ai
           BUILD_API_SECRET: ${{ secrets.BUILD_API_SECRET }}
         run: |
           set -euo pipefail
@@ -235,7 +242,7 @@ jobs:
       - name: Mark job failed
         if: failure() && steps.claim.outputs.has_job == 'true'
         env:
-          BUILD_API_URL: ${{ secrets.BUILD_API_URL }}
+          BUILD_API_URL: https://noyon-apk-master-build-server-kf12il.v2.appdeploy.ai
           BUILD_API_SECRET: ${{ secrets.BUILD_API_SECRET }}
         run: |
           JOB_ID="$(cat job_id.txt 2>/dev/null || true)"
