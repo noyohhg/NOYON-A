@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 concurrency:
   group: noyon-apk-builder
@@ -17,27 +18,27 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - name: Check configuration
-        id: config
-        env:
-          BUILD_API_SECRET: ${{ secrets.BUILD_API_SECRET }}
+      - name: Request secure GitHub OIDC token
+        id: oidc
         run: |
-          if [ -z "$BUILD_API_SECRET" ]; then
-            echo "configured=false" >> "$GITHUB_OUTPUT"
-            echo "Required Actions secrets are not configured yet."
-          else
-            echo "configured=true" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          TOKEN="$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=noyon-apk-master" | jq -r '.value')"
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+            echo "GitHub OIDC token request failed" >&2
+            exit 1
           fi
+          echo "::add-mask::$TOKEN"
+          echo "BUILD_OIDC_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+          echo "configured=true" >> "$GITHUB_OUTPUT"
 
       - name: Claim one build job
-        if: steps.config.outputs.configured == 'true'
+        if: steps.oidc.outputs.configured == 'true'
         id: claim
         env:
           BUILD_API_URL: https://noyon-apk-master-build-server-kf12il.v2.appdeploy.ai
-          BUILD_API_SECRET: ${{ secrets.BUILD_API_SECRET }}
         run: |
           set -euo pipefail
-          curl -fsS --retry 3 -H "x-worker-secret: $BUILD_API_SECRET" \
+          curl -fsS --retry 3 -H "Authorization: Bearer $BUILD_OIDC_TOKEN" \
             "$BUILD_API_URL/api/build/claim" -o job.json
           JOB_ID="$(jq -r '.job.id // empty' job.json)"
           if [ -z "$JOB_ID" ]; then
@@ -55,7 +56,7 @@ jobs:
             echo "Job is missing project_url or telegram_user_id" >&2
             exit 1
           fi
-          curl -fsS -H "x-worker-secret: $BUILD_API_SECRET" \
+          curl -fsS -H "Authorization: Bearer $BUILD_OIDC_TOKEN" \
             "$BUILD_API_URL/api/build/telegram-config" -o telegram-config.json
           TELEGRAM_BOT_TOKEN="$(jq -r '.telegram_bot_token // empty' telegram-config.json)"
           if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
@@ -87,7 +88,6 @@ jobs:
         if: steps.claim.outputs.has_job == 'true'
         env:
           BUILD_API_URL: https://noyon-apk-master-build-server-kf12il.v2.appdeploy.ai
-          BUILD_API_SECRET: ${{ secrets.BUILD_API_SECRET }}
         run: |
           set -euo pipefail
           mkdir -p app/src/main/assets/site app/src/main/java/com/noyon/apk app/src/main/res/mipmap-mdpi app/src/main/res/mipmap-hdpi app/src/main/res/mipmap-xhdpi app/src/main/res/mipmap-xxhdpi app/src/main/res/mipmap-xxxhdpi
@@ -224,7 +224,6 @@ jobs:
         if: steps.claim.outputs.has_job == 'true'
         env:
           BUILD_API_URL: https://noyon-apk-master-build-server-kf12il.v2.appdeploy.ai
-          BUILD_API_SECRET: ${{ secrets.BUILD_API_SECRET }}
         run: |
           set -euo pipefail
           CHAT_ID="$(cat chat_id.txt)"
@@ -236,19 +235,18 @@ jobs:
           JOB_ID="$(cat job_id.txt)"
           curl -fsS -X POST "$BUILD_API_URL/api/build/complete" \
             -H "Content-Type: application/json" \
-            -H "x-worker-secret: $BUILD_API_SECRET" \
+            -H "Authorization: Bearer $BUILD_OIDC_TOKEN" \
             -d "{\"job_id\":\"$JOB_ID\",\"status\":\"completed\"}"
 
       - name: Mark job failed
         if: failure() && steps.claim.outputs.has_job == 'true'
         env:
           BUILD_API_URL: https://noyon-apk-master-build-server-kf12il.v2.appdeploy.ai
-          BUILD_API_SECRET: ${{ secrets.BUILD_API_SECRET }}
         run: |
           JOB_ID="$(cat job_id.txt 2>/dev/null || true)"
           if [ -n "$JOB_ID" ]; then
             curl -fsS -X POST "$BUILD_API_URL/api/build/fail" \
               -H "Content-Type: application/json" \
-              -H "x-worker-secret: $BUILD_API_SECRET" \
+              -H "Authorization: Bearer $BUILD_OIDC_TOKEN" \
               -d "{\"job_id\":\"$JOB_ID\",\"error\":\"Build failed. Check GitHub Actions logs.\"}" || true
           fi
