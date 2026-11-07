@@ -40,8 +40,17 @@ jobs:
           BUILD_API_URL: https://noyon-apk-master-build-server-kf12il.v2.appdeploy.ai
         run: |
           set -euo pipefail
-          curl -fsS --retry 3 -H "Authorization: Bearer $BUILD_OIDC_TOKEN" \
-            "$BUILD_API_URL/api/build/claim" -o job.json
+          HTTP_CODE="$(curl -sS --retry 3 -o job.json -w '%{http_code}' -H "Authorization: Bearer $BUILD_OIDC_TOKEN" \
+            "$BUILD_API_URL/api/build/claim")"
+          echo "Build API claim HTTP status: $HTTP_CODE"
+          echo "Build API claim response:"
+          head -c 500 job.json
+          echo
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+            echo "Build API claim endpoint returned HTTP $HTTP_CODE" >&2
+            exit 1
+          fi
+          jq -e . job.json >/dev/null
           JOB_ID="$(jq -r '.job.id // empty' job.json)"
           if [ -z "$JOB_ID" ]; then
             echo "has_job=false" >> "$GITHUB_OUTPUT"
