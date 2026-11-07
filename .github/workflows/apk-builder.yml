@@ -37,7 +37,7 @@ jobs:
         if: steps.oidc.outputs.configured == 'true'
         id: claim
         env:
-          BUILD_API_URL: https://noyon-apk-master-build-server-kf12il.v2.appdeploy.ai
+          BUILD_API_URL: https://noyon-apk-master-build-server-3jxnh4.v2.appdeploy.ai
         run: |
           set -euo pipefail
           HTTP_CODE="$(curl -sS --retry 3 -o job.json -w '%{http_code}' -H "Authorization: Bearer $BUILD_OIDC_TOKEN" \
@@ -98,7 +98,7 @@ jobs:
       - name: Prepare Android WebView project
         if: steps.claim.outputs.has_job == 'true'
         env:
-          BUILD_API_URL: https://noyon-apk-master-build-server-kf12il.v2.appdeploy.ai
+          BUILD_API_URL: https://noyon-apk-master-build-server-3jxnh4.v2.appdeploy.ai
         run: |
           set -euo pipefail
           mkdir -p app/src/main/assets/site app/src/main/java/com/noyon/apk app/src/main/res/mipmap-mdpi app/src/main/res/mipmap-hdpi app/src/main/res/mipmap-xhdpi app/src/main/res/mipmap-xxhdpi app/src/main/res/mipmap-xxxhdpi
@@ -234,7 +234,7 @@ jobs:
       - name: Deliver APK to Telegram
         if: steps.claim.outputs.has_job == 'true'
         env:
-          BUILD_API_URL: https://noyon-apk-master-build-server-kf12il.v2.appdeploy.ai
+          BUILD_API_URL: https://noyon-apk-master-build-server-3jxnh4.v2.appdeploy.ai
         run: |
           set -euo pipefail
           CHAT_ID="$(cat chat_id.txt)"
@@ -252,7 +252,7 @@ jobs:
       - name: Mark job failed
         if: failure() && steps.claim.outputs.has_job == 'true'
         env:
-          BUILD_API_URL: https://noyon-apk-master-build-server-kf12il.v2.appdeploy.ai
+          BUILD_API_URL: https://noyon-apk-master-build-server-3jxnh4.v2.appdeploy.ai
         run: |
           JOB_ID="$(cat job_id.txt 2>/dev/null || true)"
           if [ -n "$JOB_ID" ]; then
